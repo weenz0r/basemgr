@@ -3051,26 +3051,24 @@ function parseMDRText(text, filename) {
     }
 
     // ── Due Value: calendar items ────────────────────────────
-    // Ramco marks the Due Value column with "23:59" timestamp
-    // e.g. "03/31/2026 23:59" — this is THE due date, use it directly
-    const dueDateWith2359 = ctx.match(/(\d{2}\/\d{2}\/\d{4})\s+23:59/);
-    if (dueDateWith2359) {
-      dueDate = r2i(dueDateWith2359[1]);
-      dueValue = fmt(dueDate);
-    }
-
-    // ── Due Value: FH items ──────────────────────────────────
-    // Ramco shows the due FH directly, e.g. "10999:26 FH" in the Due Value column
-    // It appears AFTER the interval line and AFTER any last-performed FH value
-    // We identify it as the FH value that is >= current aircraft FH
-    if (!dueDate && !dueValue && fhIntM) {
+    // ── FH-based items: interval contains FH/HR — track by hours not dates ──
+    if (fhIntM) {
+      // FH interval item — find the due FH value (>= current aircraft FH)
       const allFHinCtx = [...ctx.matchAll(/(\d{4,5}):(\d{2})\s*F?H/gi)]
         .map(m => parseFloat(m[1]+'.'+m[2]));
-      // The due FH is >= current aircraft FH (it's a future value)
       const dueFH = allFHinCtx.find(v => fh && v >= fh);
       if (dueFH !== undefined) {
+        dueDate  = null;           // Never use date for FH items
         dueValue = dueFH.toFixed(2) + ' FH';
+      } else {
+        // FH item but can't find due FH — fall back to date if available
+        const dueDateWith2359 = ctx.match(/(\d{2}\/\d{2}\/\d{4})\s+23:59/);
+        if (dueDateWith2359) { dueDate = r2i(dueDateWith2359[1]); dueValue = fmt(dueDate); }
       }
+    } else {
+      // Calendar-based item — use 23:59 date
+      const dueDateWith2359 = ctx.match(/(\d{2}\/\d{2}\/\d{4})\s+23:59/);
+      if (dueDateWith2359) { dueDate = r2i(dueDateWith2359[1]); dueValue = fmt(dueDate); }
     }
 
     // ── Skip if no due value found ───────────────────────────
