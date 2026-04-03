@@ -2588,82 +2588,32 @@ async function processQ(files,idx,results){
   log(`\n[${idx+1}] ${file.name} (${(file.size/1024).toFixed(1)} KB)`,'#00c2ff');
 
   try{
-    log('  Extracting PDF text...');
-    const pdfResult=await readPDFText(file,idx);
-    const text = typeof pdfResult === 'object' ? pdfResult.text : pdfResult;
-    const pdfStats = typeof pdfResult === 'object' ? pdfResult.stats : null;
-    log(`  Text extracted: ${text.length} chars`);
-    if(pdfStats) log(`  Streams: ${pdfStats.found} FlateDecode, ${pdfStats.ok} decompressed, ${pdfStats.cmaps||0} CMaps found`,'#ffb300');
-    if(pdfStats&&pdfStats.errors.length) log(`  Inflate errors: ${pdfStats.errors.slice(0,2).join(' | ')}`,'#ff4444');
+    log('  Loading PDF.js for coordinate extraction...');
+    setFQS(idx,'var(--amber)','Reading...');
 
-    if(!text||text.trim().length<50){
-      log('  ERROR: Too little text extracted — PDF may use unsupported encoding','#ff4444');
-      log(`  First 200 raw chars: ${text.substring(0,200)}`,'#404a5c');
-      setFQS(idx,'var(--red)','✗ No text found');
-      results.push({success:false,filename:file.name,error:'Could not extract text from PDF'});
+    const {rows, headerText, pageCount} = await extractMDRRows(file);
+    log(`  Extracted ${rows.length} task rows across ${pageCount} pages`,'#ffb300');
+
+    const acsnPrev = file.name.match(/(0322|0329|0552|9197|9635|0405)/);
+    if(acsnPrev) log(`  ACSN detected: ${acsnPrev[1]}`,'#00e676');
+    log(`  Task rows with data: ${rows.filter(r=>r.due_value||r.rem_units).length} of ${rows.length}`,'#ffb300');
+
+
+
+    setFQS(idx,'var(--amber)','Parsing...');
+    const result = parseMDRRows({rows, headerText}, file.name);
+
+    log(`  Parse result: ${result.success?'SUCCESS':'FAILED'} — ${result.success?result.inspCount+' items':result.error}`,result.success?'#00e676':'#ff4444');
+    if(result.success){
+      log(`  Report generated: ${result.reportDateTime||result.reportDate||'NOT FOUND'}`,result.reportDateTime?'#00e676':'#ff4444');
+      log(`  Aircraft: ACSN ${result.acsn} at ${result.base} | FH:${result.fh} FC:${result.fc}`,'#00e676');
+      log(`  Overdue:${result.overdue} Urgent:${result.urgent} Total:${result.inspCount}`,'#ffb300');
+
+      setFQS(idx,'var(--green)',`✓ ${result.acsn} — ${result.inspCount} items`);
+      results.push(result);
     } else {
-      // Apply UTF-16 decoding to full text first — Ramco PDFs use UTF-16 encoding
-      // Pattern: ?M?a?i?n?t?e?n?a?n?c?e? = null bytes between each char
-      let workingText = text;
-      // Count null bytes vs printable chars to detect UTF-16
-      let nulls = 0, printable = 0;
-      for (let ci = 0; ci < Math.min(text.length, 100); ci++) {
-        const cc = text.charCodeAt(ci);
-        if (cc === 0) nulls++;
-        else if (cc >= 32 && cc < 127) printable++;
-      }
-      if (nulls > printable * 0.4) {
-        // UTF-16 detected — strip null bytes and decode
-        workingText = decodeUTF16(text);
-        log(`  UTF-16 detected — decoded to ${workingText.length} chars`,'#ffb300');
-      }
-      const isGarbled = !/[A-Za-z]{5}/.test(workingText.substring(0,200));
-      if (isGarbled) log('  WARNING: Text still garbled','#ff4444');
-      const preview = workingText.substring(0,200).replace(/[^\x20-\x7E]/g,'?').replace(/\n/g,' ');
-      log(`  Preview: ${preview}...`,'#404a5c');
-      // Show first 800 chars to find the ACSN
-      const dump = workingText.substring(0,800).replace(/[^\x20-\x7E]/g,'?');
-      log(`  Full dump: ${dump}`,'#404a5c');
-
-      // Check for ACSN
-      const KNOWN=['0322','0329','0552','9197','9635','0405'];
-      let foundACSN=null;
-      // Check filename first
-      if(file&&file.name){const fm=file.name.match(/(0322|0329|0552|9197|9635|0405)/);if(fm)foundACSN=fm[1];}
-      // Then check text
-      if(!foundACSN){for(const a of KNOWN){if(workingText.includes(a)){foundACSN=a;break;}}}
-      log(`  ACSN detected: ${foundACSN||'NOT FOUND (will use filename)'}`,foundACSN?'#00e676':'#ffb300');
-
-      // Check task count before parsing
-      const taskRe=/\b([0-9]{2}[A-Z][0-9]{4}-[0-9]{2}[A-Z]?|[0-9]{2}-[0-9]{4}-[A-Z]{2}-[0-9]{3,4})\b/g;
-      const rawTasks=[...workingText.matchAll(taskRe)].map(m=>m[1]);
-      const uniqueTasks=[...new Set(rawTasks)];
-      log(`  Task numbers found: ${uniqueTasks.length} (${uniqueTasks.slice(0,5).join(', ')}${uniqueTasks.length>5?'...':''})`,uniqueTasks.length>0?'#ffb300':'#ff4444');
-
-      setFQS(idx,'var(--amber)','Parsing...');
-      const result=parseMDRText(workingText,file.name);
-      log(`  Parse result: ${result.success?'SUCCESS':'FAILED'} — ${result.success?result.inspCount+' items':result.error}`,result.success?'#00e676':'#ff4444');
-      if(result.success) log(`  Report generated: ${result.reportDateTime||result.reportDate||'NOT FOUND'}`, result.reportDateTime?'#00e676':'#ff4444');
-
-      if(window._fhDebug && window._fhDebug.length){
-        log('  --- Task Debug ---', '#5a4a7a');
-        window._fhDebug.forEach(d => log('  ' + d, '#7a6a9a'));
-        window._fhDebug = [];
-      }
-
-
-      if(result.success){
-        log(`  Aircraft: ACSN ${result.acsn} at ${result.base} | FH:${result.fh} FC:${result.fc}`,'#00e676');
-        log(`  Overdue:${result.overdue} Urgent:${result.urgent} Total:${result.inspCount}`,'#ffb300');
-
-
-
-        setFQS(idx,'var(--green)',`✓ ${result.acsn} — ${result.inspCount} items`);
-        results.push(result);
-      } else {
-        setFQS(idx,'var(--red)','✗ '+result.error);
-        results.push(result);
-      }
+      setFQS(idx,'var(--red)','✗ '+result.error);
+      results.push(result);
     }
   }catch(e){
     log(`  EXCEPTION: ${e.message}`,'#ff4444');
@@ -2735,6 +2685,321 @@ return{inflate};
 // ═══ PDF TEXT EXTRACTOR ══════════════════════════════════
 // Extracts text from PDF using built-in DecompressionStream API
 // Tries multiple decompression modes to handle all PDF variants
+
+// ═══ COORDINATE-BASED MDR PARSER (parse_mdr.py approach) ═══
+// Replaces text-mining with exact X-coordinate column reading
+// Column boundaries from parse_mdr.py (page 870x652pt landscape)
+
+const MDR_COLS = {
+  position_code:  [0,    96],
+  task_desc:      [96,   252],
+  part_serial:    [252,  357],
+  nha_details:    [357,  444],
+  task_type:      [444,  512],
+  interval:       [512,  561],
+  last_performed: [561,  620],
+  trig_param:     [620,  675],
+  rem_units:      [675,  721],
+  due_value:      [721,  776],
+  forecasted_date:[776,  870],
+};
+const MDR_DATA_Y_MIN = 250;   // top of data area (from page top)
+const MDR_DATA_Y_MAX = 590;   // bottom of data area
+const MDR_ROW_SNAP   = 3;     // px grid for line grouping
+const MDR_TASK_RE    = /^([0-9]{2}[A-Za-z][0-9]{4}-[0-9]{2}[A-Za-z]?|[0-9]{2}-[0-9]{4}-[A-Z]{2}-[0-9]+(?:P[0-9])?)$/;
+const MDR_VALID_TYPES= new Set(['INSP','INS','OTH','OVH','RTR']);
+
+function mdrColFor(x){
+  for(const [col,[lo,hi]] of Object.entries(MDR_COLS)){
+    if(x>=lo && x<hi) return col;
+  }
+  return 'unknown';
+}
+
+async function loadPDFJS(){
+  if(window.pdfjsLib) return window.pdfjsLib;
+  await new Promise((res,rej)=>{
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload=res; s.onerror=rej;
+    document.head.appendChild(s);
+  });
+  pdfjsLib.GlobalWorkerOptions.workerSrc=
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  return window.pdfjsLib;
+}
+
+async function extractMDRRows(file){
+  const pdfjs = await loadPDFJS();
+  const buf   = await file.arrayBuffer();
+  const pdf   = await pdfjs.getDocument({data:buf}).promise;
+  const allRows = [];
+  let headerText = '';
+
+  for(let pn=1; pn<=pdf.numPages; pn++){
+    const page = await pdf.getPage(pn);
+    const vp   = page.getViewport({scale:1.0});
+    const pH   = vp.height;
+    const tc   = await page.getTextContent();
+
+    // Build word list — one entry per PDF text item
+    const words = [];
+    for(const item of tc.items){
+      if(!item.str || !item.str.trim()) continue;
+      // Page is landscape-rotated: transform[5]=horizontal(X), transform[4]=vertical(top-down)
+      const x0  = item.transform[5];   // horizontal position → column detection
+      const top = item.transform[4];   // vertical position → already top-down
+      words.push({text:item.str.trim(), x0, top});
+    }
+
+    // Header text from first page (above data area)
+    if(pn===1){
+
+      headerText = words
+        .filter(w=>w.top < MDR_DATA_Y_MIN)
+        .sort((a,b)=>a.top-b.top||a.x0-b.x0)
+        .map(w=>w.text).join(' ');
+    }
+
+    // Data area words
+    const dataWords = words
+      .filter(w=>w.top>=MDR_DATA_Y_MIN && w.top<=MDR_DATA_Y_MAX)
+      .sort((a,b)=>a.top-b.top||a.x0-b.x0);
+
+    // Snap to row grid and bucket by column
+    const lineMap = new Map();
+    for(const w of dataWords){
+      const rk = Math.round(w.top/MDR_ROW_SNAP)*MDR_ROW_SNAP;
+      if(!lineMap.has(rk)) lineMap.set(rk,{});
+      const col = mdrColFor(w.x0);
+      if(!lineMap.get(rk)[col]) lineMap.get(rk)[col]=[];
+      lineMap.get(rk)[col].push(w.text);
+    }
+
+    const sortedLines = [...lineMap.entries()]
+      .sort((a,b)=>a[0]-b[0])
+      .map(([_,cols])=>{
+        const out={};
+        for(const[col,toks] of Object.entries(cols)) out[col]=toks.join(' ');
+        return out;
+      });
+
+    // Walk lines — new record on task number
+    let cur = null;
+    const newRec = (pn)=>({
+      page:pn, position_code:'', task_number:'', task_description:'',
+      part_serial:'', nha_details:'', task_type:'', interval:'',
+      last_performed:'', trig_param:'', rem_units:'', due_value:'', forecasted_date:''
+    });
+    const app = (rec,f,t)=>{ if(t) rec[f]=(rec[f]?rec[f]+' '+t:t).trim(); };
+
+    for(const cols of sortedLines){
+      const taskText = (cols.task_desc||'').trim();
+      const firstTok = taskText.split(/\s+/)[0]||'';
+      const isNew    = MDR_TASK_RE.test(firstTok);
+
+      if(isNew){
+        if(cur) allRows.push(cur);
+        cur = newRec(pn);
+        cur.task_number = firstTok;
+        cur.task_description = taskText.slice(firstTok.length).trim();
+      } else {
+        if(!cur) cur = newRec(pn);
+      }
+
+      for(const[col,text] of Object.entries(cols)){
+        if(!text||col==='unknown') continue;
+        if(col==='task_desc'){
+          if(!isNew) app(cur,'task_description',text);
+        } else if(col==='task_type'){
+          if(MDR_VALID_TYPES.has(text.trim())){ if(!cur.task_type) cur.task_type=text.trim(); }
+          else app(cur,'interval',text);
+        } else {
+          app(cur,col,text);
+        }
+      }
+    }
+    if(cur) allRows.push(cur);
+  }
+  return {rows:allRows, headerText, pageCount:pdf.numPages};
+}
+
+function parseMDRRows({rows, headerText}, filename){
+  // ── Aircraft ACSN ──────────────────────────────────────
+  const KNOWN=['0322','0329','0552','9197','9635','0405'];
+  let acsn=null;
+  if(filename){const m=filename.match(/(0322|0329|0552|9197|9635|0405)/);if(m)acsn=m[1];}
+  if(!acsn){for(const a of KNOWN){if(headerText.includes(a)){acsn=a;break;}}}
+  if(!acsn) return {success:false,filename,error:'Aircraft # not found. Rename file to include ACSN.'};
+
+  // ── Aircraft FH / FC ───────────────────────────────────
+  let fh=null,fc=null;
+  // FH and FC appear together: "11008:33 39571" — FH colon-format then FC integer
+  const fhfcM = headerText.match(/(\d{4,5}):(\d{2})\s+(\d{4,6})(?:\s|$)/);
+  if(fhfcM){ fh=parseFloat(fhfcM[1]+'.'+fhfcM[2]); fc=parseInt(fhfcM[3]); }
+  if(!fh){ const m=headerText.match(/(\d{4,5}):(\d{2})/); if(m) fh=parseFloat(m[1]+'.'+m[2]); }
+
+  // ── Config ─────────────────────────────────────────────
+  const cfgM=headerText.match(new RegExp(acsn+'\s+(\S+)\s+(\S+)'));
+  const config=cfgM?cfgM[2]:null;
+
+  // ── Report date/time ───────────────────────────────────
+  let reportDate=null,reportDateTime=null;
+  // "Generated On:" appears in page footer - search all row data
+  // Also check forecasted_date column which contains the report date on footer rows
+  const allText = headerText+' '+rows.map(r=>Object.values(r).join(' ')).join(' ');
+  const genM = allText.match(/Generated\s+On:[^\d]*(\d{2}\/\d{2}\/\d{4})\s+(\d{1,2}:\d{2})/i);
+  if(genM){reportDate=genM[1];reportDateTime=genM[1]+' '+genM[2];}
+  else{
+    const gd=allText.match(/Generated\s+On:[^\d]*(\d{2}\/\d{2}\/\d{4})/i);
+    if(gd){reportDate=gd[1];reportDateTime=gd[1];}
+    else{
+      // Fallback: look for "From MM/DD/YYYY" in header
+      const fromM=headerText.match(/From\s+(\d{2}\/\d{2}\/\d{4})/i);
+      if(fromM){reportDate=fromM[1];reportDateTime=fromM[1];}
+    }
+  }
+
+  // ── Engine SNs ────────────────────────────────────────
+  const snM=[...headerText.matchAll(/SN:\s*((?:PCE-[A-Z0-9]+|\d{4,6}))(?:\s*~\s*(\d{4,5}):(\d{2}))?/gi)];
+  const eng1sn=snM[0]?snM[0][1]:null, eng2sn=snM[1]?snM[1][1]:null;
+  const eng1fhV=snM[0]&&snM[0][2]?parseFloat(snM[0][2]+'.'+snM[0][3]):null;
+  const eng2fhV=snM[1]&&snM[1][2]?parseFloat(snM[1][2]+'.'+snM[1][3]):null;
+
+  // ── Locate aircraft record ─────────────────────────────
+  const ACMAP={'0322':'LAN','0329':'SEW','0552':'MED','9635':'WDB','9197':'WIL','0405':'SPARE'};
+  let targetBase=null;
+  for(const bc of [...gab().map(b=>b.code),'SPARE']){
+    if((S.aircraft[bc]||[]).find(a=>a.acsn===acsn)){targetBase=bc;break;}
+  }
+  if(!targetBase) targetBase=ACMAP[acsn]||'LAN';
+  if(!S.aircraft[targetBase]) S.aircraft[targetBase]=[];
+  let rec=(S.aircraft[targetBase]||[]).find(a=>a.acsn===acsn);
+  if(!rec){
+    rec={id:'ac'+acsn,acsn,model:'EC135',config,status:'avail',base:targetBase,fh:0,fc:0,eng1:null,eng2:null,mdrDate:''};
+    S.aircraft[targetBase].push(rec);
+  }
+  if(fh&&fh>0) rec.fh=fh;
+  if(fc&&fc>0) rec.fc=fc;
+  if(config) rec.config=config;
+  rec.mdrDate=new Date().toLocaleDateString('en-US');
+  rec.reportDate=reportDate||null;
+  rec.reportDateTime=reportDateTime||null;
+  if(eng1sn) rec.eng1={sn:eng1sn,fh:eng1fhV||0};
+  if(eng2sn) rec.eng2={sn:eng2sn,fh:eng2fhV||0};
+
+  // ── Parse task rows ───────────────────────────────────
+  const EXCLUDE=new Set(['00A1200-01','39E0500-24','15E0500-10','39E0500-23','15E0500-11']);
+  const EXCL_DESC=['D 0001','Desalination','MedeSol'];
+  const inspections=[];
+
+  for(const row of rows){
+    const taskNum=row.task_number.trim();
+    if(!taskNum || EXCLUDE.has(taskNum)) continue;
+    if(EXCL_DESC.some(d=>row.task_description.includes(d))) continue;
+
+    // Description
+    let desc=row.task_description.trim();
+    if(desc.length<5) desc=taskNum;
+    desc=desc.substring(0,180);
+
+    // Trig.Param — authoritative
+    const trig=row.trig_param.trim().toUpperCase();
+    const isFH=(trig==='FH');
+
+    // Engine position from position_code column — now we READ it directly!
+    const posCode=row.position_code.trim();
+    const isEng1=posCode.includes('ENG-1');
+    const isEng2=posCode.includes('ENG-2');
+    const engPos=isEng1?'ENG-1':isEng2?'ENG-2':null;
+    const engSN =isEng1?(rec.eng1?.sn||'ENG-1'):isEng2?(rec.eng2?.sn||'ENG-2'):null;
+
+    // Rem. Units — read directly, no calculation
+    let remVal=null, remUnit=null;
+    const remStr=row.rem_units.trim();
+    if(remStr){
+      const rf=remStr.match(/(\d{1,4}):(\d{2})\s*FH/i);
+      const rd=remStr.match(/(\d+)\s*DAYS?/i);
+      const rm=remStr.match(/(\d+)\s*MONTHS?/i);
+      if(rf){remVal=parseFloat(rf[1]+'.'+rf[2]);remUnit='FH';}
+      else if(rd){remVal=parseInt(rd[1]);remUnit='DAYS';}
+      else if(rm){remVal=parseInt(rm[1])*30;remUnit='DAYS';}
+    }
+
+    // Due value — read directly from due_value column
+    let dueDate=null,dueValue='';
+    const dvStr=row.due_value.trim();
+    if(dvStr){
+      const fhD=dvStr.match(/(\d{4,5}):(\d{2})\s*F?H?/i);
+      const calD=dvStr.match(/(\d{2}\/\d{2}\/\d{4})/);
+      if(isFH&&fhD) dueValue=parseFloat(fhD[1]+'.'+fhD[2]).toFixed(2)+' FH';
+      else if(calD){dueDate=r2i(calD[1]);dueValue=fmt(dueDate);}
+      else if(fhD) dueValue=parseFloat(fhD[1]+'.'+fhD[2]).toFixed(2)+' FH';
+    }
+    if(!dueDate&&!dueValue) continue;
+
+    // Interval label
+    let interval='—';
+    const intStr=row.interval.trim();
+    if(intStr){
+      const fi=intStr.match(/(\d{1,4}):00\s*FH/i);
+      const di=intStr.match(/(\d+)\s*DAYS?/i);
+      const mi=intStr.match(/(\d+)\s*MONTHS?/i);
+      if(fi) interval=fi[1]+' FH';
+      else if(mi) interval=mi[1]+' MONTH';
+      else if(di) interval=di[1]+' DAYS';
+      else if(/ONE\s*TIME/i.test(intStr)) interval='ONE TIME';
+    }
+
+    // Priority — from Rem.Units (Ramco already calculated this)
+    let priority='ok';
+    if(remVal!==null){
+      if(remUnit==='FH'){
+        priority=remVal<=0?'overdue':remVal<=10?'urgent':remVal<=50?'upcoming':'ok';
+      } else {
+        priority=remVal<=0?'overdue':remVal<=14?'urgent':remVal<=60?'upcoming':'ok';
+      }
+    } else if(dueDate){
+      const d=du(dueDate);
+      priority=d<0?'overdue':d<=14?'urgent':d<=60?'upcoming':'ok';
+    }
+
+    // Build description with engine SN label for engine tasks
+    const fullDesc=engPos
+      ? desc.replace(/\s*#[12]\s*/,' ').trim()+' ['+engPos+' SN:'+engSN+']'
+      : desc;
+
+    const idSuffix=engPos?'_'+engPos.replace('-',''):'';
+    inspections.push({
+      id: acsn+'_'+taskNum.replace(/[^a-z0-9]/gi,'_')+idSuffix,
+      acsn, taskNum, desc:fullDesc,
+      category: gCat(taskNum,desc),
+      interval, dueDate, dueValue,
+      remFH: remUnit==='FH'?remVal:null,
+      priority, taskType:row.task_type||'INSP', lastDone:'',
+      ...(engPos&&{engPos,engSN}),
+    });
+  }
+
+  // Save
+  if(!S.inspections[targetBase]) S.inspections[targetBase]=[];
+  const mdrTs=Date.now();
+  inspections.forEach(i=>i._mdrTs=mdrTs);
+  S.inspections[targetBase]=S.inspections[targetBase].filter(i=>i.acsn!==acsn);
+  S.inspections[targetBase].push(...inspections);
+  if(rec) rec._mdrTs=mdrTs;
+  ss();
+
+  return {
+    success:true, filename, acsn,
+    base:targetBase, fh, fc, config,
+    reportDate, reportDateTime,
+    inspCount:inspections.length,
+    melCount:0,
+    overdue:inspections.filter(i=>i.priority==='overdue').length,
+    urgent: inspections.filter(i=>i.priority==='urgent').length,
+  };
+}
 
 function extractPDFText(bytes) {
   const stats = {found:0, ok:0, failed:0, total:0, errors:[]};
@@ -3167,6 +3432,8 @@ function parseMDRText(text, filename) {
 
 
 
+
+
     // Description: text right after task number, before type keywords
     let desc = text.substring(pos + taskNum.length, pos + taskNum.length + 300)
       .replace(/\s+/g, ' ').trim()
@@ -3182,67 +3449,97 @@ function parseMDRText(text, filename) {
     let interval = '—', dueDate = '', dueValue = '', priority = 'ok';
 
     // ── Interval label ───────────────────────────────────────
-    const calM  = ctx.match(/\b(\d+)\s*MONTH\s*END|\b(\d+)\s*DAYS\b|ONE\s*TIME|THRESHOLD/i);
-    // FH interval: small number (1-999) with :00 FH suffix e.g. "25:00 FH", "100:00 FH"
-    const fhIntM = ctx.match(/\b([1-9]\d{0,2}):00\s*FH\b/i);
+    // ── Read Trig. Param column to determine FH vs Calendar ─
+    // MDR format after description:
+    // CAL: [DueDate 23:59] [Interval DAYS/MONTHS] [RemDays DAYS] [ForecastedDate] ...
+    // FH:  [DueFH:NN FH]   [Interval:NN FH]       [RemFH:NN FH]  [ForecastedDate] ...
+    // Trig.Param appears as "INSP FH" or "INSP CALENDAR" or "OTH FH" etc.
 
-    // FH wins over calendar for dual-interval tasks (e.g. "100 Hour / 90 Day")
-    if (fhIntM) {
+    const trigFH  = /\bINSP\s+FH\b|\bOTH\s+FH\b/i.test(ctx);
+    const fhIntM  = ctx.match(/\b([1-9]\d{0,3}):00\s*FH\b/i);
+
+    // Interval label
+    if (fhIntM && trigFH) {
       interval = fhIntM[1] + ' FH';
-    } else if (calM) {
-      const months = parseInt(calM[1])||0, days = parseInt(calM[2])||0;
-      interval = months>0 ? months+' MONTH' : days>0 ? days+' DAYS' : 'ONE TIME';
+    } else {
+      const calM2 = ctx.match(/\b(\d+)\s*MONTHS?(?:\s+END)?\b|\b(\d+)\s*DAYS?\b|ONE\s*TIME|THRESHOLD/i);
+      if (calM2) {
+        const mo = parseInt(calM2[1])||0, dy = parseInt(calM2[2])||0;
+        interval = mo>0 ? mo+' MONTH' : dy>0 ? dy+' DAYS' : 'ONE TIME';
+      }
     }
 
-    // ── Due value + Rem. Units extraction ────────────────────
-    // MDR column order (after task description):
-    // FH item:  [DueFH:NN FH] [Interval:NN FH] [RemFH:NN FH] [Forecasted MM/DD/YYYY] [LastFH]
-    // CAL item: [MM/DD/YYYY 23:59] [Interval DAYS/MONTH] [Rem NN DAYS] [Forecasted] [LastDate]
-    // Key: Rem. Units is the 3rd FH value or the 2nd DAYS value in the task row
-
-    if (fhIntM) {
-      // FH item — find due FH (first large value >= 1000 in ctx)
-      const allFHvals = [...ctx.matchAll(/(\d{3,5}):(\d{2})\s*FH/gi)]
+    // ── Due value and priority ────────────────────────────
+    if (trigFH && fhIntM) {
+      // FH-tracked item
+      // Find all large FH values in ctx
+      const allFHinCtx = [...ctx.matchAll(/(\d{3,5}):(\d{2})\s*FH/gi)]
         .map(m => parseFloat(m[1]+'.'+m[2]));
-      // Determine correct minimum FH threshold (engine or aircraft)
-      const tCtxE = ctx.substring(0, 500);
-      const e1snE = rec && rec.eng1 ? rec.eng1.sn : null;
-      const e2snE = rec && rec.eng2 ? rec.eng2.sn : null;
-      const isE1 = tCtxE.includes('AF-7200-ENG-1') || (e1snE && tCtxE.includes(e1snE));
-      const isE2 = tCtxE.includes('AF-7200-ENG-2') || (e2snE && tCtxE.includes(e2snE));
-      let minCurFH = fh || 0;
-      if (isE1 && !isE2 && rec && rec.eng1) minCurFH = rec.eng1.fh || fh || 0;
-      if (isE2 && !isE1 && rec && rec.eng2) minCurFH = rec.eng2.fh || fh || 0;
-      if (isE1 && isE2) minCurFH = Math.min(rec&&rec.eng1?rec.eng1.fh||fh:fh, rec&&rec.eng2?rec.eng2.fh||fh:fh);
-      // Due FH must be >= current FH (last-performed values are always < current FH)
-      const dueFHval = allFHvals.find(v => v >= minCurFH);
-      if (dueFHval !== null && dueFHval !== undefined) {
+
+      // Detect if this is a true engine-specific task (due FH is in engine FH range)
+      // Engine tasks: due FH < aircraft FH (engine time < aircraft total time)
+      // Aircraft tasks: due FH > aircraft FH
+      const e1sn = rec && rec.eng1 ? rec.eng1.sn : null;
+      const e2sn = rec && rec.eng2 ? rec.eng2.sn : null;
+      const tc = ctx.substring(0, 500);
+      const hasE1ref = tc.includes('AF-7200-ENG-1') || (e1sn && tc.includes(e1sn));
+      const hasE2ref = tc.includes('AF-7200-ENG-2') || (e2sn && tc.includes(e2sn));
+
+      // Engine FH values (< aircraft FH by definition)
+      const eng1fh = rec && rec.eng1 ? rec.eng1.fh : 0;
+      const eng2fh = rec && rec.eng2 ? rec.eng2.fh : 0;
+      const maxEngFH = Math.max(eng1fh, eng2fh);
+
+      // Due FH: prefer value >= aircraft FH (aircraft-level task)
+      // Fall back to value >= max engine FH (engine task)
+      let dueFHval = allFHinCtx.find(v => v >= (fh||0));
+      let isEngineLevel = false;
+      if (dueFHval === undefined && maxEngFH > 0) {
+        // No aircraft-level due FH found — try engine FH range
+        dueFHval = allFHinCtx.find(v => v >= maxEngFH * 0.9); // within 10% of engine FH
+        if (dueFHval !== undefined) isEngineLevel = true;
+      }
+
+      // Rem. Units = small FH value in row (< interval value, typically < 999)
+      const intFH = fhIntM ? parseInt(fhIntM[1]) : 999;
+      const remFHM = [...ctx.matchAll(/\b(\d{1,3}):(\d{2})\s*FH\b/gi)]
+        .map(m => parseFloat(m[1]+'.'+m[2]))
+        .filter(v => v < intFH * 1.5); // rem should be less than interval
+      const remFH = remFHM.length > 0 ? remFHM[0] : null;
+
+      if (dueFHval !== undefined) {
         dueDate  = null;
         dueValue = dueFHval.toFixed(2) + ' FH';
-        const remCalc = Math.round((dueFHval - minCurFH) * 10) / 10;
-        if (remCalc <= 0)        priority = 'overdue';
-        else if (remCalc <= 25)  priority = 'urgent';
-        else if (remCalc <= 100) priority = 'upcoming';
-        else                     priority = 'ok';
+        // Use Ramco's Rem.Units if available — it's authoritative
+        // Fallback: calculate from appropriate FH reference
+        let baseFH2 = isEngineLevel
+          ? (hasE1ref && !hasE2ref ? eng1fh : hasE2ref && !hasE1ref ? eng2fh : Math.min(eng1fh||fh, eng2fh||fh))
+          : (fh || 0);
+        const rem = remFH !== null ? remFH : Math.round((dueFHval - baseFH2) * 10) / 10;
+        if (rem <= 0)       priority = 'overdue';
+        else if (rem <= 10) priority = 'urgent';
+        else if (rem <= 50) priority = 'upcoming';
+        else                priority = 'ok';
       } else {
-        const dueDateWith2359 = ctx.match(/(\d{2}\/\d{2}\/\d{4})\s+23:59/);
-        if (dueDateWith2359) { dueDate = r2i(dueDateWith2359[1]); dueValue = fmt(dueDate); }
+        const m23 = ctx.match(/(\d{2}\/\d{2}\/\d{4})\s+23:59/);
+        if (m23) { dueDate = r2i(m23[1]); dueValue = fmt(dueDate); }
       }
     } else {
-      // Calendar item — use 23:59 date
-      const dueDateWith2359 = ctx.match(/(\d{2}\/\d{2}\/\d{4})\s+23:59/);
-      if (dueDateWith2359) {
-        dueDate  = r2i(dueDateWith2359[1]);
+      // Calendar-tracked — use 23:59 due date
+      const m23 = ctx.match(/(\d{2}\/\d{2}\/\d{4})\s+23:59/);
+      if (m23) {
+        dueDate  = r2i(m23[1]);
         dueValue = fmt(dueDate);
-        const d = du(dueDate);
-        if (d < 0)        priority = 'overdue';
-        else if (d <= 14) priority = 'urgent';
-        else if (d <= 60) priority = 'upcoming';
-        else              priority = 'ok';
+        // Rem. Units = last "NN DAYS" value in row (interval is first, rem is last)
+        const allDays = [...ctx.matchAll(/\b(\d{1,3})\s+DAYS?\b/gi)].map(m=>parseInt(m[1]));
+        const rem = allDays.length >= 2 ? allDays[allDays.length-1] :
+                    allDays.length === 1 ? allDays[0] : du(dueDate);
+        if (rem <= 0)       priority = 'overdue';
+        else if (rem <= 14) priority = 'urgent';
+        else if (rem <= 60) priority = 'upcoming';
+        else                priority = 'ok';
       }
     }
-
-
 
     // ── Skip if no due value found ───────────────────────────
     // Items with no due date or FH value are excluded (daily/on-condition tasks)
@@ -3272,88 +3569,96 @@ function parseMDRText(text, filename) {
 
 
 
-    // Engine task detection using tight ctx window
-    const tightCtx = ctx.substring(0, 500);
-    // Detect by position code OR engine serial number
-    const eng1sn_cur = rec && rec.eng1 ? rec.eng1.sn : null;
-    const eng2sn_cur = rec && rec.eng2 ? rec.eng2.sn : null;
-    let engPos1 = tightCtx.includes('AF-7200-ENG-1') ? 1 : 0;
-    let engPos2 = tightCtx.includes('AF-7200-ENG-2') ? 2 : 0;
-    // Also detect by engine serial (e.g. PCE-BJ1213 at start of task NHA)
-    if(!engPos1 && eng1sn_cur && tightCtx.includes(eng1sn_cur)) engPos1 = 1;
-    if(!engPos2 && eng2sn_cur && tightCtx.includes(eng2sn_cur)) engPos2 = 2;
-    // Require FH interval for true engine tasks
-    const isEngineTask = (engPos1 || engPos2) && fhIntM && interval.includes('FH');
+    // ── Engine task detection and splitting ──────────────
+    // Engine tasks appear TWICE in the MDR — once per engine
+    // Detect by finding engine position codes and serial numbers in ctx
+    const tc2 = ctx.substring(0, 600);
+    const e1sn_cur = rec && rec.eng1 ? rec.eng1.sn : null;
+    const e2sn_cur = rec && rec.eng2 ? rec.eng2.sn : null;
+    const hasEng1ref = tc2.includes('AF-7200-ENG-1') || (e1sn_cur && tc2.includes(e1sn_cur));
+    const hasEng2ref = tc2.includes('AF-7200-ENG-2') || (e2sn_cur && tc2.includes(e2sn_cur));
 
-    // For engine tasks, determine which engine this occurrence is for
-    // and get the correct engine FH
-    // Use engine FH from current MDR header (most accurate)
-    const eng1fhCur = eng1fh || (rec && rec.eng1 ? rec.eng1.fh : 0) || 0;
-    const eng2fhCur = eng2fh || (rec && rec.eng2 ? rec.eng2.fh : 0) || 0;
+    // A task is engine-specific if it has FH interval AND engine refs
+    const isEngTask = trigFH && fhIntM && (hasEng1ref || hasEng2ref);
 
-    // If engine task, find per-engine due FH values
-    // Pattern in ctx: "[engFH] FH ... [interval]:00 FH"
-    // Engine 1 due FH >= eng1 current FH, Engine 2 due FH >= eng2 current FH
-    if(isEngineTask && dueValue && dueValue.includes('FH') && (eng1fhCur > 0 || eng2fhCur > 0)){
-      // Find all FH values in ctx
-      const allFHvals = [...ctx.matchAll(/(\d{4,5}):(\d{2})\s*FH/gi)]
+    if (isEngTask && hasEng1ref && hasEng2ref && !processedEngineTasks.has(taskNum)) {
+      // Both engines in ctx — split into two separate inspection items
+      // Find ALL large FH values in full ctx (not just first 500 chars)
+      const allEngFH = [...ctx.matchAll(/(\d{4,5}):(\d{2})\s*FH/gi)]
         .map(m => parseFloat(m[1]+'.'+m[2]));
 
-      if(engPos1 && engPos2){
-        // Both engines in ctx - split into two tasks
-        // Find ENG-1 due FH (>= eng1 current FH)
-        const due1 = allFHvals.find(v => eng1fhCur && v >= eng1fhCur);
-        // Find ENG-2 due FH (>= eng2 current FH, different from due1)
-        const due2 = allFHvals.find(v => eng2fhCur && v >= eng2fhCur && v !== due1);
+      const eng1fhCur2 = rec && rec.eng1 ? (rec.eng1.fh || 0) : 0;
+      const eng2fhCur2 = rec && rec.eng2 ? (rec.eng2.fh || 0) : 0;
 
-        if(due1 !== undefined){
-          const rem1 = due1 - eng1fhCur;
-          const pri1 = rem1<0?'overdue':rem1<=25?'urgent':rem1<=100?'upcoming':'ok';
-          const rem1calc = due1 - eng1fhCur;
-          inspections.push({
-            id: acsn+'_'+taskNum+'_ENG1',
-            acsn, taskNum, desc: desc + ' — ENG 1',
-            category: gCat(taskNum,desc),
-            interval, dueDate:null, dueValue: due1.toFixed(2)+' FH',
-            remFH: Math.round(rem1calc*10)/10,
-            priority:pri1, taskType:ttype, lastDone:'', engPos:'ENG-1'
-          });
-        }
-        if(due2 !== undefined){
-          const rem2 = due2 - eng2fhCur;
-          const pri2 = rem2<0?'overdue':rem2<=25?'urgent':rem2<=100?'upcoming':'ok';
-          const rem2calc = due2 - eng2fhCur;
-          inspections.push({
-            id: acsn+'_'+taskNum+'_ENG2',
-            acsn, taskNum, desc: desc + ' — ENG 2',
-            category: gCat(taskNum,desc),
-            interval, dueDate:null, dueValue: due2.toFixed(2)+' FH',
-            remFH: Math.round(rem2calc*10)/10,
-            priority:pri2, taskType:ttype, lastDone:'', engPos:'ENG-2'
-          });
-        }
-        processedEngineTasks.add(taskNum);
-      } else {
-        // Single engine task
-        const engNum = engPos1 || engPos2;
-        const curEngFH = engNum===1 ? eng1fhCur : eng2fhCur;
-        const dueFH = allFHvals.find(v => curEngFH && v >= curEngFH) ||
-                      (allFHvals.length ? Math.min(...allFHvals.filter(v=>v>curEngFH*0.8)) : undefined);
-        if(dueFH !== undefined){
-          const rem = dueFH - curEngFH;
-          priority = rem<0?'overdue':rem<=25?'urgent':rem<=100?'upcoming':'ok';
-          dueValue = dueFH.toFixed(2)+' FH';
-        }
+      // Find each engine's due FH — values >= that engine's current FH
+      // Sort ascending so we get the nearest due value
+      const eng1candidates = allEngFH.filter(v => eng1fhCur2 && v >= eng1fhCur2).sort((a,b)=>a-b);
+      const eng2candidates = allEngFH.filter(v => eng2fhCur2 && v >= eng2fhCur2 && v !== eng1candidates[0]).sort((a,b)=>a-b);
+
+      const due1 = eng1candidates[0];
+      const due2 = eng2candidates[0];
+
+      // Rem. Units — find two small FH values (the remaining FH for each engine)
+      const remFHvals = [...ctx.matchAll(/\b([1-9]\d{0,2}):(\d{2})\s*FH\b/gi)]
+        .map(m => parseFloat(m[1]+'.'+m[2]));
+
+      const eng1sn_label = e1sn_cur || 'ENG-1';
+      const eng2sn_label = e2sn_cur || 'ENG-2';
+
+      if (due1 !== undefined) {
+        // Use Ramco's Rem.Units directly — first small FH value = ENG-1 remaining
+        const rem1 = remFHvals[0] !== undefined ? remFHvals[0] : Math.round((due1-eng1fhCur2)*10)/10;
+        // Trust Ramco: if rem > 0, not overdue
+        const pri1 = rem1<=0?'overdue':rem1<=10?'urgent':rem1<=50?'upcoming':'ok';
         inspections.push({
-          id: acsn+'_'+taskNum.replace(/[^a-z0-9]/gi,'_'),
-          acsn, taskNum, desc: desc + (engNum?' — ENG '+engNum:''),
+          id: acsn+'_'+taskNum+'_ENG1',
+          acsn, taskNum,
+          desc: desc.replace(/\s*#[12]\s*/,' ').trim() + ' [ENG-1 SN:'+eng1sn_label+']',
           category: gCat(taskNum,desc),
-          interval, dueDate:null, dueValue,
-          priority, taskType:ttype, lastDone:'', engPos:'ENG-'+engNum
+          interval, dueDate:null, dueValue:due1.toFixed(2)+' FH',
+          remFH: rem1, priority:pri1, taskType:ttype, lastDone:'', engPos:'ENG-1', engSN:eng1sn_label
         });
       }
-    } else {
-      // Non-engine task - normal push
+      if (due2 !== undefined) {
+        const rem2 = remFHvals[1] !== undefined ? remFHvals[1] : Math.round((due2-eng2fhCur2)*10)/10;
+        const pri2 = rem2<=0?'overdue':rem2<=10?'urgent':rem2<=50?'upcoming':'ok';
+        inspections.push({
+          id: acsn+'_'+taskNum+'_ENG2',
+          acsn, taskNum,
+          desc: desc.replace(/\s*#[12]\s*/,' ').trim() + ' [ENG-2 SN:'+eng2sn_label+']',
+          category: gCat(taskNum,desc),
+          interval, dueDate:null, dueValue:due2.toFixed(2)+' FH',
+          remFH: rem2, priority:pri2, taskType:ttype, lastDone:'', engPos:'ENG-2', engSN:eng2sn_label
+        });
+      }
+      processedEngineTasks.add(taskNum);
+
+    } else if (isEngTask && hasEng1ref && !hasEng2ref) {
+      // Single ENG-1 task
+      const eng1sn_label = e1sn_cur || 'ENG-1';
+      const remFHM2 = ctx.match(/\b([1-9]\d{0,2}):(\d{2})\s*FH\b/i);
+      const remFH2 = remFHM2 ? parseFloat(remFHM2[1]+'.'+remFHM2[2]) : null;
+      inspections.push({
+        id: acsn+'_'+taskNum+'_ENG1',
+        acsn, taskNum, desc: desc+' [ENG-1 SN:'+eng1sn_label+']',
+        category: gCat(taskNum,desc), interval, dueDate:null, dueValue,
+        remFH: remFH2, priority, taskType:ttype, lastDone:'', engPos:'ENG-1', engSN:eng1sn_label
+      });
+
+    } else if (isEngTask && hasEng2ref && !hasEng1ref) {
+      // Single ENG-2 task
+      const eng2sn_label = e2sn_cur || 'ENG-2';
+      const remFHM3 = ctx.match(/\b([1-9]\d{0,2}):(\d{2})\s*FH\b/i);
+      const remFH3 = remFHM3 ? parseFloat(remFHM3[1]+'.'+remFHM3[2]) : null;
+      inspections.push({
+        id: acsn+'_'+taskNum+'_ENG2',
+        acsn, taskNum, desc: desc+' [ENG-2 SN:'+eng2sn_label+']',
+        category: gCat(taskNum,desc), interval, dueDate:null, dueValue,
+        remFH: remFH3, priority, taskType:ttype, lastDone:'', engPos:'ENG-2', engSN:eng2sn_label
+      });
+
+    } else if (!processedEngineTasks.has(taskNum)) {
+      // Non-engine task or already-processed engine task
       inspections.push({
         id: acsn+'_'+taskNum.replace(/[^a-z0-9]/gi,'_'),
         acsn, taskNum, desc,
@@ -3364,7 +3669,7 @@ function parseMDRText(text, filename) {
     }
 
 
-  }
+  }  // end taskMatches for loop
 
   // ── Extract MEL / deferred items from MDR ─────────────────
   // MELs appear in Ramco MDRs as task rows with type MEL or CDL,
